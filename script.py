@@ -100,15 +100,19 @@ def save_submission(path, fieldnames, rows):
 def main():
     # ---- 경로 변수 (필요에 따라 수정) ----
     TEST_DIR = "./data"            # test.jsonl, sample_submission.csv 위치
-    MODEL_DIR = "./model"          # tfidf_logreg.pkl 위치
+    MODEL_DIR = "./model"          # tfidf_lgbm.pkl 위치
     OUT_DIR = "./output"
     TEST_PATH = os.path.join(TEST_DIR, "test.jsonl")
     SAMPLE_SUB_PATH = os.path.join(TEST_DIR, "sample_submission.csv")
-    MODEL_PATH = os.path.join(MODEL_DIR, "tfidf_logreg.pkl")
+    # 수정: tfidf_logreg.pkl -> tfidf_lgbm.pkl
+    # 학습 스크립트(script_1.1.1.py)가 분류기를 LogisticRegression에서
+    # LightGBM으로 교체하면서 저장 파일명도 tfidf_lgbm.pkl로 바뀌었기 때문에,
+    # 추론 스크립트가 실제 학습된 모델(LightGBM)을 찾아 불러오도록 맞춘다.
+    MODEL_PATH = os.path.join(MODEL_DIR, "tfidf_lgbm.pkl")
     OUT_PATH = os.path.join(OUT_DIR, "submission.csv")
 
     # ---- 모델 로드 ----
-    # 학습 노트북이 저장한 파이프라인(TF-IDF + 로지스틱 회귀)을 그대로 불러옵니다.
+    # 학습 노트북(script_1.1.1.py)이 저장한 파이프라인(TF-IDF + LightGBM)을 그대로 불러옵니다.
     print("Load model...")
     model = joblib.load(MODEL_PATH)
     classes = list(getattr(model, "classes_", []))
