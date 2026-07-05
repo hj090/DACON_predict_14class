@@ -3,8 +3,17 @@
 AI 코딩 에이전트가 대화 도중 특정 시점에서 다음에 취할 행동(action)을
 14개 클래스 중 하나로 예측하는 문제의 베이스라인 구현입니다.
 
-현재 단계는 `current_prompt`(사용자의 현재 발화) 텍스트만 사용하는
-**TF-IDF + LightGBM** 파이프라인입니다.
+현재 실제로 운영 중인 모델은 `current_prompt`(사용자의 현재 발화) 텍스트만
+사용하는 **TF-IDF + LogisticRegression** 파이프라인입니다.
+
+> ⚠️ 이 문서는 실제 코드를 기준으로 작성되었습니다.
+> 과거 논의 과정에서 LightGBM/문자 n-gram 병행/언어별 평가 등의 대안이
+> 검토된 적이 있으나, **실제로 채택되어 코드에 반영된 적은 없습니다.**
+> 이 문서에서는 실제 코드와 향후 검토 사항을 명확히 구분해서 표기합니다.
+>
+> **2026-07-05 업데이트**: 학습(`script_1.1.1.py`)과 추론(`script.py`)이
+> `script_full.py` 하나로 통합되었습니다. 기존 두 파일은 더 이상 사용하지
+> 않습니다 (레거시로만 보관).
 
 ## 목차
 
@@ -14,15 +23,16 @@ AI 코딩 에이전트가 대화 도중 특정 시점에서 다음에 취할 행
 - [설치](#설치)
 - [사용법](#사용법)
 - [코드 구조](#코드-구조)
-- [추론 (Inference)](#추론-inference)
 - [하이퍼파라미터](#하이퍼파라미터)
-- [평가 지표](#평가-지표)
-- [로드맵](#로드맵)
+- [확인이 필요한 부분](#확인이-필요한-부분)
+- [레거시 파일](#레거시-파일)
+- [로드맵 (검토/제안 단계, 미반영)](#로드맵-검토제안-단계-미반영)
 
 ## 문제 정의
 
 한 에이전트 세션의 특정 시점 상태(`session_meta`, `history`, `current_prompt`)가
 주어졌을 때, 에이전트가 다음에 수행할 행동을 아래 14개 클래스 중 하나로 예측합니다.
+(`ALL_CLASSES` 리스트로 코드에 명시되어 있으며 Macro-F1 계산에 사용됩니다.)
 
 | 카테고리 | 행동(action) |
 |---|---|
@@ -70,22 +80,20 @@ data/
 
 ## 현재 구현 범위
 
-> **이 저장소는 아직 `current_prompt`만 사용하는 1단계 베이스라인입니다.**
-
 | 정보 | 상태 |
 |---|---|
-| `current_prompt` (텍스트) | ✅ 사용 중 |
-| `session_meta.language_pref` | 평가(언어별 F1 확인)에만 사용, 모델 입력 아님 |
-| `session_meta`, `workspace` (그 외 필드) | ❌ 미사용 (다음 단계 예정) |
-| `history` | ❌ 미사용 (다음 단계 예정) |
+| `current_prompt` (텍스트) | ✅ 사용 중 (유일한 모델 입력) |
+| `session_meta`, `workspace` | ❌ 미사용 |
+| `history` | ❌ 미사용 |
 
-언어별(한국어/영어/혼합) 분리 모델 대신, 단어 n-gram과 문자(char) n-gram을 함께
-쓰는 **단일 파이프라인**으로 혼합 문장에 대응하는 전략을 택했습니다.
+`current_prompt` 하나만으로 TF-IDF(단어 단위) + LogisticRegression을
+학습하는 것이 현재 코드의 전부입니다. 언어별(한국어/영어/혼합) 분리나
+문자 n-gram 병행 등은 **논의만 되었을 뿐 코드에는 없습니다.**
 
 ## 설치
 
 ```bash
-pip install scikit-learn lightgbm joblib numpy
+pip install scikit-learn joblib
 ```
 
 ## 사용법
@@ -94,90 +102,101 @@ pip install scikit-learn lightgbm joblib numpy
 project/
 ├── data/
 │   ├── train.jsonl
-│   └── train_labels.csv
+│   ├── train_labels.csv
+│   ├── test.jsonl
+│   └── sample_submission.csv
 ├── model/                  # 학습 후 자동 생성
-└── script_1.1.1.py
+├── output/                 # 추론 후 자동 생성
+└── script_full.py
 ```
 
 ```bash
-python script_1.1.1.py
+python script_full.py
 ```
 
-실행하면 `model/tfidf_lgbm.pkl`(학습된 파이프라인)과
-`model/test_set.pkl`(재현 가능한 테스트셋)이 생성됩니다.
+한 번 실행으로 다음이 순서대로 수행됩니다.
+
+1. `train.jsonl` + `train_labels.csv`로 학습 (`train()` 함수)
+   → 검증 세트 Macro-F1 출력 → 전체 데이터로 재학습 → `model/tfidf_logreg.pkl` 저장
+2. 방금 학습한 모델로 바로 `test.jsonl` 추론 (`infer()` 함수)
+   → `output/submission.csv` 생성
 
 ## 코드 구조
+
+`script_full.py`는 크게 세 부분으로 구성됩니다.
+
+| 구역 | 함수 | 내용 |
+|---|---|---|
+| 공통 유틸 | `load_jsonl`, `validate_samples`, `extract_text`, `build_features`, `load_sample_submission`, `merge_predictions`, `save_submission` | 학습/추론 양쪽에서 재사용하는 데이터 입출력 함수 |
+| 학습 | `train()` | 아래 표 참고 |
+| 추론 | `infer(pipe)` | `test.jsonl` 로드 → 예측 → `submission.csv` 생성 |
+
+`train()` 내부 단계:
 
 | 단계 | 내용 |
 |---|---|
 | 1. 데이터 로드 | `train.jsonl` + `train_labels.csv` → `current_prompt`, `action` 추출 |
-| 2. train/test 분할 | `stratify=y`로 클래스 비율 유지, 80/20 분할 |
-| 3. TF-IDF 벡터화 | 단어 n-gram(1,2) + 문자 n-gram(2,4)을 `FeatureUnion`으로 결합 |
-| 4. 분류기 설정 | `LGBMClassifier(class_weight="balanced")` |
-| 5. 학습 | `Pipeline.fit()` |
-| 6. 평가 | 전체 macro F1 + 언어별(ko/en/mixed) macro F1 |
-| 7. 저장 | 파이프라인 및 테스트셋을 `joblib`으로 직렬화 |
+| 2. train/val 분할 | `stratify=y`, `test_size=0.2`, `random_state=42`로 80/20 분할 |
+| 3. TF-IDF 벡터화 | 단어 n-gram(1,2), `min_df=2`, `max_features=80,000` |
+| 4. 분류기 | `LogisticRegression(max_iter=500, class_weight="balanced", C=2.0)` |
+| 5. 1차 학습 | `pipe.fit(X_train, y_train)` — train(80%)으로만 학습 |
+| 6. 검증 | `f1_score(y_val, val_pred, labels=ALL_CLASSES, average="macro", zero_division=0)` 로 Macro-F1 출력 |
+| 7. 재학습 | `pipe.fit(X, y)` — **전체 데이터(100%)로 다시 학습** |
+| 8. 저장 | `joblib.dump(pipe, "./model/tfidf_logreg.pkl", compress=3)` |
 
-## 추론 (Inference)
+> 5번과 7번이 서로 다른 학습이라는 점에 주의하세요. 5번은 검증(val)용으로
+> train(80%)만 학습한 모델이고, 7번은 실제로 저장/배포되는 모델로
+> 전체 데이터(100%)를 다시 학습시킨 것입니다. **6번에서 확인한 Macro-F1은
+> 5번 모델 기준이며, 7번(최종 저장 모델)의 성능을 그대로 보장하지는
+> 않습니다** (데이터가 늘었으므로 비슷하거나 더 나을 가능성이 높지만
+> 별도로 검증된 사실은 아님).
 
-학습된 모델을 실제 평가/제출에 사용하는 스크립트는 `script.py`입니다.
-`test.jsonl`을 읽어 `sample_submission.csv` 형식에 맞춰 `submission.csv`를 생성합니다.
-
-```bash
-python script.py
-```
-
-```
-project/
-├── data/
-│   ├── test.jsonl
-│   └── sample_submission.csv
-├── model/
-│   └── tfidf_lgbm.pkl      # 학습 스크립트가 생성한 파일
-└── output/
-    └── submission.csv      # 자동 생성됨
-```
-
-> **변경 이력 (2026-07-05)**: 분류기를 `LogisticRegression` → `LightGBM`으로
-> 교체하면서 학습 스크립트의 저장 파일명이 `tfidf_logreg.pkl`에서
-> `tfidf_lgbm.pkl`로 바뀌었습니다. `script.py`의 `MODEL_PATH`도 이에 맞춰
-> `tfidf_lgbm.pkl`을 참조하도록 함께 수정했습니다. `model/` 폴더에
-> 예전 `tfidf_logreg.pkl`이 남아있다면 실제로는 더 이상 사용되지
-> 않으니, 혼동을 막기 위해 삭제하거나 `tfidf_logreg_deprecated.pkl`
-> 처럼 이름을 구분해서 보관하는 것을 권장합니다.
+`infer(pipe)`는 `train()`이 반환한 모델 객체를 그대로 받아서 예측하므로,
+같은 실행 안에서는 `tfidf_logreg.pkl`을 다시 읽어올 필요가 없습니다.
+(저장된 `.pkl`은 재사용/배포용으로 남겨두는 것입니다.)
 
 ## 하이퍼파라미터
 
 ### TF-IDF
 
-| 파라미터 | 값 | 설명 |
-|---|---|---|
-| `ngram_range` (word) | (1, 2) | 단어 유니그램+바이그램 |
-| `ngram_range` (char) | (2, 4) | 문자 2~4-gram, 언어 경계 무관 |
-| `max_features` (word / char) | 60,000 / 20,000 | 어휘 예산 배분 |
-| `min_df` | 2 | 2회 미만 등장 토큰 제외 |
-| `sublinear_tf` | True | 로그 스케일링 |
+| 파라미터 | 값 |
+|---|---|
+| `ngram_range` | (1, 2) |
+| `min_df` | 2 |
+| `max_features` | 80,000 |
+| `sublinear_tf` | True |
+| `lowercase` | True |
 
-### LightGBM
+### LogisticRegression
 
-| 파라미터 | 값 | 설명 |
-|---|---|---|
-| `num_leaves` | 63 | 트리 복잡도 |
-| `learning_rate` | 0.05 | 학습률 |
-| `n_estimators` | 500 | 트리 개수 |
-| `min_child_samples` | 20 | 과적합 억제 |
-| `class_weight` | balanced | 클래스 불균형 보정 |
+| 파라미터 | 값 |
+|---|---|
+| `max_iter` | 500 |
+| `class_weight` | balanced |
+| `C` | 2.0 |
 
-## 평가 지표
+## 확인이 필요한 부분
 
-- **전체 macro F1**: 14개 클래스를 동일 가중치로 평균
-- **언어별 macro F1**: `session_meta.language_pref` 기준 ko/en/mixed 각각 확인
-  (모델이 혼합 문장에서 유독 성능이 낮은지 모니터링 목적)
+- **언어별 성능 확인 로직 없음**: 데이터에 `session_meta.language_pref`(ko/en/mixed)
+  필드가 존재하지만, 현재 코드는 이를 전혀 참조하지 않습니다. 혼합 문장(전체의 약 10%)
+  에서 성능이 유독 낮은지 여부는 아직 실제로 측정된 적이 없습니다.
 
-## 로드맵
+## 레거시 파일
 
-- [ ] `session_meta` / `workspace` 구조화 피처 추가 (`DictVectorizer`)
-- [ ] `history`에서 직전 action, 행동 시퀀스 등 파생 피처 추가
+`script_1.1.1.py`(학습 전용), `script.py`(추론 전용)는 `script_full.py`로
+통합되면서 더 이상 사용하지 않습니다. 참고용으로만 남겨두었으며,
+실제 실행은 `script_full.py` 하나로 하시면 됩니다.
+
+## 로드맵 (검토/제안 단계, 미반영)
+
+아래 항목들은 작업 중 논의되었으나 **실제 코드에는 반영되지 않은 제안 사항**입니다.
+채택 여부는 위 "확인이 필요한 부분"의 baseline 수치를 먼저 확보한 뒤 결정 권장.
+
+- [x] val 평가 코드 추가/확인 (Macro-F1 출력 확인됨, script_full.py 반영 완료)
+- [ ] `session_meta.language_pref` 기준 언어별 macro F1 분리 확인
+- [ ] 문자(char) n-gram 병행 검토 (혼합 문장 대응 목적)
+- [ ] `session_meta` / `workspace` 구조화 피처 추가 검토
+- [ ] `history`에서 직전 action 등 파생 피처 추가 검토
+- [ ] LightGBM 등 다른 분류기로 교체 검토 (LogisticRegression과 비교 실험 필요)
 - [ ] Stage 2: multilingual MiniLM 기반 정밀 분류기
 - [ ] ONNX 변환 + INT8 양자화 (Stage 2 모델 대상)
-- [ ] 언어별 그룹 성능 격차 해소 (특히 혼합 문장)
