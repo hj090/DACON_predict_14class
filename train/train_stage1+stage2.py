@@ -237,7 +237,7 @@ stage1_results, stage2_input_ids, stage2_probs = route_by_confidence(
     ids=val_ids,
     probs=probs,
     classes=best_clf.classes_,   ### 임유미 추가
-    threshold=1.0,
+    threshold=0.7,
 )
 
 print(f"Stage1에서 확정된 샘플 수: {len(stage1_results)}")
@@ -248,7 +248,7 @@ stage1_conf_probs = best_clf.predict_proba(X_val_vec)
 max_conf = stage1_conf_probs.max(axis=1)
 pred = best_clf.predict(X_val_vec)
 
-threshold = 1.0  # 사용 중인 임계값
+threshold = 0.7  # 사용 중인 임계값
 confirmed_mask = max_conf >= threshold
 
 confirmed_acc = (pred[confirmed_mask] == np.array(y_val)[confirmed_mask]).mean()
@@ -260,7 +260,7 @@ print(f"🎯 확정 샘플 중 정확도: {confirmed_acc:.4f}")
 import matplotlib.pyplot as plt
 
 plt.hist(max_conf, bins=30)
-plt.axvline(0.8, color='red', label='threshold=0.8 (current)')
+plt.axvline(0.8, color='red', label='threshold=0.7 (current)')
 plt.axvline(0.5, color='green', label='threshold=0.5 (candidate)')
 plt.legend()
 plt.title("Stage1 Confidence Distribution")
