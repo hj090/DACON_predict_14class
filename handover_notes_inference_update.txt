@@ -1,0 +1,231 @@
+============================================================
+인수인계 문서 — 추론 스크립트(script.py) session_meta 반영 요청
+작성일: 2026-07-09 (개정: 2026-07-09, SentenceTransformer 로컬
+        모델 다운로드/포함 작업 완료 반영)
+대상 파일: stage1_stage2_07_08_.py (학습, 분석 완료), script.py (추론, 수정 필요)
+============================================================
+
+[1] 문서 목적
+------------------------------------------------------------
+학습 코드(stage1_stage2_07_08_.py)를 확인한 결과, 이전 인수인계 문서
+(handover_notes.txt, 2026-07-05 작성) 이후로 학습 파이프라인이
+Stage1(TF-IDF+규칙피처+session_meta+LightGBM) + Stage2(임베딩+
+session_meta+LogisticRegression 헤드) 구조로 크게 확장되었음.
+
+반면 현재 추론 스크립트(script.py)는 이전 단일 모델(tfidf_lgbm.pkl
+하나만 로드해서 raw text를 바로 predict) 기준으로 작성되어 있어,
+학습 코드가 실제로 저장하는 5개 모델 파일과 session_meta 피처를
+전혀 반영하지 못하는 상태임.
+
+본 문서는 (1) 학습 코드 분석 결과 공유, (2) 현재 script.py의
+문제점 정리, (3) session_meta를 반영한 추론 코드로 재작성해달라는
+요청사항을 정리하기 위해 작성함.
+
+
+[2] 학습 코드(stage1_stage2_07_08_.py) 구조 요약
+------------------------------------------------------------
+
+--------------------------------------------------------------
+2-1. Stage1 (문장 단위 1차 분류)
+--------------------------------------------------------------
+입력 피처 = FeatureUnion(tfidf_chi2, rule_features) + session_meta 인코딩
+  - tfidf_chi2: TfidfVectorizer(ngram_range=(1,3), min_df=2,
+    max_features=80000, sublinear_tf=True) -> SelectKBest(chi2, k=30000)
+  - rule_features: RuleFeatureExtractor (정규식 기반 규칙 피처 15개,
+    현재 prompt 텍스트에서 직접 추출, fit 불필요)
+  - session_meta 인코딩: extract_session_features(sample_id)로
+    session_meta.workspace 등에서 12개 파생 피처 생성 후
+    ColumnTransformer(session_encoder)로 인코딩
+      · 범주형(OneHotEncoder): language_pref, last_ci_status,
+        git_dirty, user_tier, dominant_code_lang
+      · 수치형(passthrough): turn_index, budget_tokens_remaining_log,
+        loc_log, n_open_files, dominant_code_ratio, n_code_langs,
+        elapsed_session_sec_log
+
+위 세 갈래를 hstack으로 결합 -> LightGBM(clf_final)로 학습
+
+동시에 규칙 피처(rule_features)만 단독으로 LogisticRegression
+(rule_only_clf_final)에 학습시켜, 아래처럼 두 모델을 앙상블:
+  ensemble_probs = w * tfidf_probs(LightGBM) + (1-w) * rule_probs(LogReg)
+  확정된 값: best_w = 0.8, best_threshold = 0.8 (검증 데이터로 탐색)
+
+ensemble_probs 기준 최고 확률이 threshold(0.8) 이상이면 Stage1에서
+바로 라벨 확정, 미만이면 Stage2로 라우팅 (route_by_confidence 함수)
+
+
+--------------------------------------------------------------
+2-2. Stage2 (Stage1에서 확신도 낮은 샘플만 재분류)
+--------------------------------------------------------------
+입력 피처 = 문장 임베딩 + Stage1 앙상블 확률(14차원) + session_meta 인코딩
+  - 텍스트: history 최근 3턴 + current_prompt를 합친 문자열
+    (build_stage2_input_text)
+  - 임베딩: SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+    로 인코딩 (⚠ 사전학습 모델, 별도 fit 없음 — 3-1 참고)
+  - session_meta 인코딩: Stage1과 동일한 session_encoder(이미 fit됨)를
+    transform만 하여 재사용
+
+위 세 피처를 hstack -> LogisticRegression(head_final)으로 학습
+(5-fold OOF로 검증 후, 전체 stage2 데이터로 최종 재학습)
+
+
+--------------------------------------------------------------
+2-3. 최종 저장되는 모델 파일 5개 (./model/)
+--------------------------------------------------------------
+  vectorizer.pkl       = vectorizer_final
+                         (FeatureUnion: tfidf_chi2 + rule_features)
+  session_encoder.pkl  = session_encoder_final (ColumnTransformer)
+  tfidf_lgbm.pkl       = clf_final (Stage1 메인 분류기, LightGBM)
+  rule_logreg.pkl      = rule_only_clf_final (Stage1 앙상블 보조, LogReg)
+  stage2_head.pkl      = head_final (Stage2 분류 헤드, LogReg)
+
+※ SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")는
+  joblib으로 저장되지 않음 — 사전학습 모델을 이름으로 그대로
+  불러오는 방식이라 별도 파일로 남지 않음 (3-1에서 리스크로 다룸)
+
+
+[3] 현재 script.py의 문제점
+------------------------------------------------------------
+
+--------------------------------------------------------------
+3-1. [해결됨] SentenceTransformer 오프라인 로드 불가 문제
+--------------------------------------------------------------
+학습 코드는 SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")를
+이름으로 불러와 HuggingFace Hub에서 다운로드하는 방식임.
+대회 평가 서버는 인터넷 접속이 비활성화되어 있어(패키지 설치 외
+외부 서버 연결/다운로드 불가) 이름으로 로드하면 실패할 가능성이
+매우 높았던 부분인데, 해당 작업은 이미 완료함.
+
+-> 모델 가중치를 로컬 폴더(./model/minilm_local_path)로 미리
+   다운로드해서 submit.zip의 model/ 디렉토리 안에 이미 포함시켜
+   두었음. 용량도 1GB 제한 이내로 확인 완료.
+   -> 다음 작업자는 이 부분 추가 작업 불필요. 추론 코드에서는
+      SentenceTransformer("./model/minilm_local_path") 처럼
+      로컬 경로로 로드하도록 작성하기만 하면 됨.
+
+--------------------------------------------------------------
+3-2. tfidf_lgbm.pkl을 완전한 파이프라인으로 오인
+--------------------------------------------------------------
+현재 script.py는 tfidf_lgbm.pkl 하나만 불러와서
+model.predict(texts)로 raw 텍스트를 바로 넣고 있음.
+그러나 tfidf_lgbm.pkl(clf_final)은 이미 벡터화 + session_meta
+인코딩까지 끝난 수치형 피처를 입력으로 기대하는 LightGBM
+분류기일 뿐, 텍스트를 직접 처리하는 파이프라인이 아님.
+-> 현재 코드로 실행하면 벡터화되지 않은 문자열이 그대로
+   predict에 들어가 에러가 발생하거나, 의도한 것과 다른 결과가 나올 것으로 예상됨.
+
+--------------------------------------------------------------
+3-3. vectorizer.pkl / session_encoder.pkl / rule_logreg.pkl /
+     stage2_head.pkl 전부 미사용
+--------------------------------------------------------------
+학습 코드가 저장하는 5개 파일 중 tfidf_lgbm.pkl만 로드하고
+나머지 4개는 script.py 어디에서도 불러오지 않음.
+-> Stage1 앙상블(LightGBM+LogReg), 확신도 기반 Stage1/Stage2
+   라우팅, Stage2 재분류 로직이 추론 단계에 전혀 반영되지 않음.
+
+--------------------------------------------------------------
+3-4. session_meta 미반영
+--------------------------------------------------------------
+extract_text()가 current_prompt만 추출하고 있고, build_features()도
+텍스트만 만들고 있어 session_meta(workspace, user_tier,
+budget_tokens_remaining 등)가 추론 입력에 전혀 반영되지 않음.
+학습 시 session_meta 피처가 Stage1/Stage2 모두에 사용되었으므로,
+이 피처 없이 예측하면 학습 때와 다른 입력 분포로 추론하는 셈이 되어
+성능 저하가 예상됨.
+
+--------------------------------------------------------------
+3-5. history 미반영 (Stage2 관련)
+--------------------------------------------------------------
+Stage2 입력 텍스트는 history 최근 3턴 + current_prompt를 합쳐서
+만드는데, 현재 script.py는 history 필드를 전혀 읽지 않음.
+
+
+[4] 요청사항 — session_meta 반영한 추론 코드로 재작성
+------------------------------------------------------------
+학습 코드(stage1_stage2_07_08_.py)가 생성한 5개 모델 파일(및 3-1의
+SentenceTransformer 로컬 파일)을 모두 활용해서, 아래 순서로
+추론이 이루어지도록 script.py를 재작성해줄 것을 요청함.
+
+  1) 5개 모델 파일(vectorizer.pkl, session_encoder.pkl,
+     tfidf_lgbm.pkl, rule_logreg.pkl, stage2_head.pkl) + 로컬
+     SentenceTransformer 가중치(./model/minilm_local_path, 준비 완료)를
+     모두 로드
+
+  2) 테스트 샘플(test.jsonl)마다 다음을 추출
+     - current_prompt (텍스트)
+     - history (Stage2용, 최근 3턴)
+     - session_meta 기반 파생 피처 12개
+       (학습 코드의 extract_session_features 로직과 동일해야 함 —
+       단, 학습 코드는 samples_by_id[id]로 우회 조회하는 구조라
+       테스트 샘플 dict를 바로 인자로 받도록 함수를 리팩터링해서
+       가져와야 함)
+
+  3) Stage1 추론
+     - vectorizer.transform(texts) 로 tfidf+규칙 피처 생성
+     - session_encoder.transform(session_df) 로 session_meta 인코딩
+     - 위 둘을 hstack -> tfidf_lgbm(clf).predict_proba() = tfidf_probs
+     - rule_features만 별도 추출 -> rule_logreg.predict_proba()
+       = rule_probs
+     - ensemble_probs = 0.8 * tfidf_probs + 0.2 * rule_probs
+       (best_w=0.8, 학습 코드 값 그대로 사용)
+
+  4) 확신도 라우팅
+     - max(ensemble_probs) >= 0.8 (best_threshold) 인 샘플은
+       바로 라벨 확정 (Stage1 결과)
+     - 미만인 샘플은 Stage2로 전달
+
+  5) Stage2 추론 (해당 샘플만)
+     - history+current_prompt 텍스트를 SentenceTransformer로 임베딩
+     - [임베딩 + Stage1 ensemble_probs(14차원) + session_meta 인코딩]
+       hstack -> stage2_head.predict() 로 최종 라벨 확정
+
+  6) Stage1 확정분 + Stage2 확정분을 합쳐 최종 예측 딕셔너리 구성
+     후, 기존처럼 sample_submission.csv 순서에 맞춰 병합/저장
+     (merge_predictions, save_submission 함수는 그대로 재사용 가능)
+
+
+[5] 참고 — 확인/논의가 필요한 부분
+------------------------------------------------------------
+1) extract_session_features 함수는 학습 코드에서 samples_by_id를
+   통해 id로 원본 샘플을 찾아오는 구조라, 추론 시엔 테스트 샘플
+   dict를 직접 인자로 받는 버전으로 별도 작성 필요
+   (로직 자체는 동일하게 유지)
+
+2) best_w=0.8, best_threshold=0.8은 학습 코드에서 검증셋 기준으로
+   탐색한 값을 하드코딩한 것 — 추론 코드에도 동일하게 하드코딩해서
+   반영하면 되며, 별도 튜닝은 필요 없음 (이미 확정값)
+
+3) [완료] SentenceTransformer 로컬 파일 저장/포함 작업은 이미 처리함
+   (model.save('./model/minilm_local_path')로 저장 후 submit.zip
+   model/ 디렉토리에 포함 완료, 용량 1GB 이내 확인) — 추론 코드
+   작성 시 이 경로로 로드하기만 하면 되며, 다음 작업자가 별도로
+   다운로드/저장 작업을 할 필요는 없음
+
+4) session_encoder(ColumnTransformer)는 OneHotEncoder(handle_unknown
+   ="ignore")로 학습되어 있어, 테스트 데이터에 학습 시 보지 못한
+   범주값이 있어도 에러 없이 무시되고 0으로 처리됨 — 추론 코드에서
+   별도 예외처리 불필요
+
+5) 추론 실행 시간 제한(10분, 대회 가이드 기준)을 고려할 때 Stage2
+   대상 샘플에 대해서만 SentenceTransformer 임베딩을 수행하도록
+   해야 함 (전체 샘플에 대해 임베딩하면 시간 초과 위험)
+
+
+[6] 다음 담당자를 위한 제안 순서
+------------------------------------------------------------
+※ SentenceTransformer 가중치 로컬 저장 및 submit.zip 포함 작업은
+   완료된 상태이므로, 다음 담당자는 아래 순서만 진행하면 됨
+   (기존 1단계였던 로컬 다운로드/저장 작업은 생략).
+
+1. extract_session_features를 테스트 샘플 dict 입력용으로 리팩터링
+2. script.py에 5개 모델 로드 + Stage1 앙상블 + 확신도 라우팅 +
+   Stage2 추론 순서로 재작성 (4번 항목 순서 그대로)
+3. 소량 샘플(예: test.jsonl 일부)로 Stage1 확정 비율, Stage2 라벨
+   분포가 학습 시 로그(handover_notes.txt 5번 항목 참고)와 비슷한지
+   확인
+4. 전체 test.jsonl로 실행해 실행 시간(10분 제한) 및 submission.csv
+   형식(sample_submission.csv와 id 순서/컬럼 일치) 확인
+5. 최종 submit.zip 구성 후 제출
+
+============================================================
+문서 끝
+============================================================
