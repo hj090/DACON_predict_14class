@@ -1,7 +1,7 @@
 ============================================================
 인수인계 문서 — 추론 스크립트(script.py) session_meta 반영 요청
 작성일: 2026-07-09 (개정: 2026-07-09, SentenceTransformer 로컬
-        모델 다운로드/포함 작업 완료 반영)
+        모델 전달 방식을 Git → Google Drive로 변경 반영)
 대상 파일: stage1_stage2_07_08_.py (학습, 분석 완료), script.py (추론, 수정 필요)
 ============================================================
 
@@ -87,20 +87,38 @@ ensemble_probs 기준 최고 확률이 threshold(0.8) 이상이면 Stage1에서
 ------------------------------------------------------------
 
 --------------------------------------------------------------
-3-1. [해결됨] SentenceTransformer 오프라인 로드 불가 문제
+3-1. [해결됨, 단 전달 방식 변경] SentenceTransformer 오프라인 로드
+     불가 문제 — 모델 파일은 Git이 아닌 Google Drive로 전달 예정
 --------------------------------------------------------------
 학습 코드는 SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")를
 이름으로 불러와 HuggingFace Hub에서 다운로드하는 방식임.
 대회 평가 서버는 인터넷 접속이 비활성화되어 있어(패키지 설치 외
 외부 서버 연결/다운로드 불가) 이름으로 로드하면 실패할 가능성이
-매우 높았던 부분인데, 해당 작업은 이미 완료함.
+매우 높았던 부분인데, 로컬 폴더로 미리 다운로드해두는 작업 자체는
+완료함.
 
--> 모델 가중치를 로컬 폴더(./model/minilm_local_path)로 미리
-   다운로드해서 submit.zip의 model/ 디렉토리 안에 이미 포함시켜
-   두었음. 용량도 1GB 제한 이내로 확인 완료.
-   -> 다음 작업자는 이 부분 추가 작업 불필요. 추론 코드에서는
-      SentenceTransformer("./model/minilm_local_path") 처럼
-      로컬 경로로 로드하도록 작성하기만 하면 됨.
+단, 아래 이유로 이 모델 파일은 **Git 저장소에는 포함하지 않고
+Google Drive로 별도 전달**하기로 함:
+  - model/minilm_local/model.safetensors 파일이 448.83MB로,
+    GitHub의 파일당 용량 제한(100MB)을 초과함
+  - git push 시 "GH001: Large files detected" 에러로 push 자체가
+    거부되어, 해당 파일은 git 커밋/히스토리에서 제거함
+    (LFS를 별도로 세팅하는 대신, 대용량 모델 가중치는 애초에
+    git 밖에서 관리하는 방식으로 결정)
+
+-> **다음 작업자 확인/조치 필요:**
+   1) Google Drive로 전달받은 SentenceTransformer 로컬 모델 폴더
+      (model.safetensors 포함, minilm_local 폴더 전체)를 다운로드
+   2) 로컬 프로젝트의 model/ 디렉토리 하위에 학습 코드가 저장했던
+      경로와 동일하게 배치: model/minilm_local/
+      (vectorizer.pkl 등 나머지 4개 pkl 파일과 같은 model/ 폴더 아래,
+      minilm_local이라는 하위 폴더로 넣으면 됨)
+   3) 추론 코드(script.py)에서는 이 경로를 그대로
+      SentenceTransformer("./model/minilm_local") 처럼 로컬 경로로
+      로드하도록 작성
+   4) 최종 제출용 submit.zip을 만들 때도 model/minilm_local 폴더를
+      (git 이력과 무관하게) 반드시 포함시켜야 함 — git에는 없지만
+      제출 압축파일에는 있어야 하는 파일이라는 점 유의
 
 --------------------------------------------------------------
 3-2. tfidf_lgbm.pkl을 완전한 파이프라인으로 오인
@@ -147,8 +165,8 @@ SentenceTransformer 로컬 파일)을 모두 활용해서, 아래 순서로
 
   1) 5개 모델 파일(vectorizer.pkl, session_encoder.pkl,
      tfidf_lgbm.pkl, rule_logreg.pkl, stage2_head.pkl) + 로컬
-     SentenceTransformer 가중치(./model/minilm_local_path, 준비 완료)를
-     모두 로드
+     SentenceTransformer 가중치(./model/minilm_local, Google Drive로
+     전달받아 배치 필요)를 모두 로드
 
   2) 테스트 샘플(test.jsonl)마다 다음을 추출
      - current_prompt (텍스트)
@@ -194,11 +212,15 @@ SentenceTransformer 로컬 파일)을 모두 활용해서, 아래 순서로
    탐색한 값을 하드코딩한 것 — 추론 코드에도 동일하게 하드코딩해서
    반영하면 되며, 별도 튜닝은 필요 없음 (이미 확정값)
 
-3) [완료] SentenceTransformer 로컬 파일 저장/포함 작업은 이미 처리함
-   (model.save('./model/minilm_local_path')로 저장 후 submit.zip
-   model/ 디렉토리에 포함 완료, 용량 1GB 이내 확인) — 추론 코드
-   작성 시 이 경로로 로드하기만 하면 되며, 다음 작업자가 별도로
-   다운로드/저장 작업을 할 필요는 없음
+3) [완료, 단 전달 방식 변경] SentenceTransformer 로컬 파일
+   저장 작업(model.save('./model/minilm_local'))은 완료했으나,
+   해당 폴더의 model.safetensors(448.83MB)가 GitHub 파일당 용량
+   제한(100MB)을 초과해 git push가 거부됨(GH001 에러). 이에 따라
+   이 모델 파일은 git 저장소가 아닌 Google Drive로 별도 전달함.
+   -> 다음 작업자는 Drive에서 minilm_local 폴더를 받아 로컬
+      프로젝트의 model/ 디렉토리 밑에 그대로 넣어야 하며
+      (경로: model/minilm_local/), 최종 submit.zip 만들 때도
+      git 추적 여부와 무관하게 이 폴더를 반드시 포함시켜야 함
 
 4) session_encoder(ColumnTransformer)는 OneHotEncoder(handle_unknown
    ="ignore")로 학습되어 있어, 테스트 데이터에 학습 시 보지 못한
@@ -212,10 +234,16 @@ SentenceTransformer 로컬 파일)을 모두 활용해서, 아래 순서로
 
 [6] 다음 담당자를 위한 제안 순서
 ------------------------------------------------------------
-※ SentenceTransformer 가중치 로컬 저장 및 submit.zip 포함 작업은
-   완료된 상태이므로, 다음 담당자는 아래 순서만 진행하면 됨
-   (기존 1단계였던 로컬 다운로드/저장 작업은 생략).
+※ SentenceTransformer 가중치 로컬 저장 작업 자체는 완료된 상태이나,
+   용량 문제(448.83MB > GitHub 100MB 제한)로 git에는 올리지 않고
+   Google Drive로 별도 전달함. 따라서 아래 0단계(Drive 다운로드 및
+   배치)를 가장 먼저 수행해야 함.
 
+0. Google Drive에서 SentenceTransformer 로컬 모델 폴더(minilm_local,
+   model.safetensors 포함)를 다운로드하여, 로컬 프로젝트의
+   model/ 디렉토리 밑에 model/minilm_local/ 경로로 배치
+   (vectorizer.pkl, session_encoder.pkl, tfidf_lgbm.pkl,
+   rule_logreg.pkl, stage2_head.pkl과 같은 model/ 폴더 하위)
 1. extract_session_features를 테스트 샘플 dict 입력용으로 리팩터링
 2. script.py에 5개 모델 로드 + Stage1 앙상블 + 확신도 라우팅 +
    Stage2 추론 순서로 재작성 (4번 항목 순서 그대로)
@@ -224,7 +252,8 @@ SentenceTransformer 로컬 파일)을 모두 활용해서, 아래 순서로
    확인
 4. 전체 test.jsonl로 실행해 실행 시간(10분 제한) 및 submission.csv
    형식(sample_submission.csv와 id 순서/컬럼 일치) 확인
-5. 최종 submit.zip 구성 후 제출
+5. 최종 submit.zip 구성 시 model/minilm_local 폴더(Git에는 없는
+   파일이므로 누락 주의)를 반드시 포함해서 제출
 
 ============================================================
 문서 끝
