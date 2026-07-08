@@ -237,7 +237,7 @@ print(importance_df[importance_df["feature"].str.startswith((
     "cat__last_ci_status", "cat__git_dirty", "cat__user_tier", "num__turn_index", "num__budget_tokens_remaining_log", 'num__loc_log', 'num__n_open_files',
     'cat__dominant_code_lang_go', 'cat__dominant_code_lang_java', 'cat__dominant_code_lang_py', 'cat__dominant_code_lang_rs',
     'cat__dominant_code_lang_ts', 'cat__dominant_code_lang_tsx', 'cat__dominant_code_lang_vue', 'cat__dominant_code_lang_yaml',
-    'num__turn_index', 'num__budget_tokens_remaining_log', 'num__loc_log' 'num__n_open_files', 'num__dominant_code_ratio', 'num__n_code_langs', 'num__elapsed_session_sec_log'))])
+    'num__turn_index', 'num__budget_tokens_remaining_log', 'num__loc_log', 'num__n_open_files', 'num__dominant_code_ratio', 'num__n_code_langs', 'num__elapsed_session_sec_log'))])
 
 tfidf_probs_train = best_clf.predict_proba(X_train_final)   # 학습셋 확률 (가중치 튜닝용)
 tfidf_probs_val = best_clf.predict_proba(X_val_final)       # 검증셋 확률
@@ -438,12 +438,25 @@ for fold_idx, (train_idx, val_idx) in enumerate(skf.split(feat_all, y_stage2_arr
 # 이제 stage2_input_ids 전체에 대해 예측이 다 채워짐
 stage2_oof_dict = dict(zip(stage2_input_ids, oof_preds))
 
+for fold_idx, (train_idx, val_idx) in enumerate(skf.split(feat_all, y_stage2_arr)):
+    head_fold = LogisticRegression(max_iter=1000, class_weight="balanced")
+    head_fold.fit(feat_all[train_idx], y_stage2_arr[train_idx])
+    oof_preds[val_idx] = head_fold.predict(feat_all[val_idx])
+    print(f"Fold {fold_idx+1}/{n_splits} 완료")
+
+stage2_oof_dict = dict(zip(stage2_input_ids, oof_preds))
+
+# ---- 전체 stage2 데이터로 최종 head 학습 ----
+head_final = LogisticRegression(max_iter=1000, class_weight="balanced")
+head_final.fit(feat_all, y_stage2_arr)
+
 """##4. Stage2 Macro-F1 측정"""
 
-pred_s2_val = head.predict(feat_val)
-stage2_macro_f1 = f1_score(y_s2_val, pred_s2_val, labels=ALL_CLASSES, average="macro", zero_division=0)
-print(f"Stage2 단독 Validation Macro-F1: {stage2_macro_f1:.4f}")
-print(classification_report(y_s2_val, pred_s2_val, labels=ALL_CLASSES, zero_division=0))
+"""##4. Stage2 Macro-F1 측정"""
+
+stage2_macro_f1 = f1_score(y_stage2_arr, oof_preds, labels=ALL_CLASSES, average="macro", zero_division=0)
+print(f"Stage2 단독 Validation Macro-F1 (OOF): {stage2_macro_f1:.4f}")
+print(classification_report(y_stage2_arr, oof_preds, labels=ALL_CLASSES, zero_division=0))
 
 """#Stage1+Stage2 전체 Macro-F1 측정"""
 
@@ -468,8 +481,18 @@ print(classification_report(y_true_final, y_pred_final, labels=ALL_CLASSES, zero
 vectorizer_final = vectorizer_pipe
 X_full_vec = vectorizer_final.fit_transform(X, y)
 
+# --- session_meta도 전체 데이터 기준으로 재fit ---
+session_full_df = pd.DataFrame([extract_session_features(i) for i in ids])
+session_encoder_final = ColumnTransformer([
+    ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=True), CATEGORICAL_COLS),
+    ("num", "passthrough", NUMERIC_COLS),
+])
+session_full_enc = session_encoder_final.fit_transform(session_full_df)
+
+X_full_final = hstack([X_full_vec, session_full_enc])   # session_meta 포함!
+
 clf_final = clf
-clf_final.fit(X_full_vec, y)
+clf_final.fit(X_full_final, y)
 
 rule_features_full = rule_extractor.transform(X)
 rule_only_clf_final = LogisticRegression(class_weight="balanced", max_iter=1000, random_state=42)
@@ -479,6 +502,8 @@ rule_only_clf_final.fit(rule_features_full, y)
 os.makedirs("./model", exist_ok=True)
 
 joblib.dump(vectorizer_final, "./model/vectorizer.pkl", compress=3)
+joblib.dump(session_encoder_final, "./model/session_encoder.pkl", compress=3)  # 임유미  추가
+joblib.dump(head_final, "./model/stage2_head.pkl", compress=3) # 임유미 추가
 joblib.dump(clf_final, "./model/tfidf_lgbm.pkl", compress=3)
 joblib.dump(rule_only_clf_final, "./model/rule_logreg.pkl", compress=3)
 
